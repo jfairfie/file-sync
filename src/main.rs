@@ -7,6 +7,7 @@ use std::env;
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tokio::io::AsyncBufReadExt;
 use tokio::{fs, io};
 use walkdir::WalkDir;
@@ -17,7 +18,7 @@ struct IniConfig {
     target_dir: String,
     upload_dir: String,
     bucket_name: String,
-    max_size: u64
+    max_size: u64,
 }
 
 #[tokio::main]
@@ -34,7 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => panic!("No credentials found"),
     }
 
-    println!("Enter either u or s to continue");
+    println!("\n---- Enter a command ----");
+    println!("u -- upload files from upload file to the server");
+    println!("s -- sync files to target directory from the server");
+    println!("l -- list current files and also write to a local .txt \n");
 
     let stdin = io::stdin();
 
@@ -47,10 +51,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sync_to_server(&ini_config).await?;
     } else if input.trim() == "s" {
         sync_with_server(&ini_config).await?;
+    } else if input.trim() == "l" {
+        display_server_files().await?;
     }
 
     println!("Enter any key to exit");
     reader.read_line(&mut input).await?;
+
+    Ok(())
+}
+
+async fn display_server_files() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server_files: Vec<String> = list_server_files()
+        .await?
+        .iter()
+        .map(|file| file.clone())
+        .collect();
+
+    server_files.sort();
+
+    for file in &server_files {
+        println!("{}", file);
+    }
+
+    let time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_secs();
+
+    let file_name = format!("song-list-{}", time);
+
+    // Write to a local .txt file
+    let txt_path = Path::new(&file_name);
+
+    let content = server_files.join("\n");
+    tokio::fs::write(txt_path, content).await?;
 
     Ok(())
 }
@@ -67,7 +101,11 @@ async fn sync_to_server(config: &IniConfig) -> Result<(), Box<dyn std::error::Er
         .difference(&server_files)
         .collect::<Vec<&String>>();
 
-    println!("Found {} file(s) to upload {:?}", upload_files.len(), upload_files);
+    println!(
+        "Found {} file(s) to upload {:?}",
+        upload_files.len(),
+        upload_files
+    );
 
     if upload_files.is_empty() {
         println!("No files to upload");
@@ -97,7 +135,7 @@ async fn zip_and_upload(
     config: &IniConfig,
     file_name: &String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-let upload_base = PathBuf::from(&config.upload_dir);
+    let upload_base = PathBuf::from(&config.upload_dir);
     let specific_song_path = upload_base.join(file_name);
 
     // Create the zip in the base upload directory, NOT inside specific_song_path
@@ -359,7 +397,10 @@ async fn download_file(
     Ok(())
 }
 
-fn list_local_files(dir: &String, max_size: Option<u64>) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+fn list_local_files(
+    dir: &String,
+    max_size: Option<u64>,
+) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
     let mut local_files: HashSet<String> = HashSet::new();
     let path = Path::new(dir);
 
@@ -373,7 +414,12 @@ fn list_local_files(dir: &String, max_size: Option<u64>) -> Result<HashSet<Strin
                             let max_size_bytes = max_size.unwrap() * 1024 * 1024;
                             let dir_size = get_dir_size(res.path());
 
-                            println!("Checking size of directory {}: {} {}", res.path().display(), dir_size, max_size_bytes);
+                            println!(
+                                "Checking size of directory {}: {} {}",
+                                res.path().display(),
+                                dir_size,
+                                max_size_bytes
+                            );
 
                             if dir_size <= max_size_bytes {
                                 local_files.insert(res.file_name().into_string().unwrap());
@@ -385,7 +431,6 @@ fn list_local_files(dir: &String, max_size: Option<u64>) -> Result<HashSet<Strin
                                     .expect("Error converting to string"),
                             );
                         }
-
                     }
                 }
                 Err(err) => {
@@ -469,7 +514,8 @@ fn verify_required_files() {
 fn verify_config() -> IniConfig {
     let config_map = ini!("config.ini");
 
-    let local_section_keys: (&str, Vec<&str>) = ("local", vec!["target_dir", "upload_dir", "max_size"]);
+    let local_section_keys: (&str, Vec<&str>) =
+        ("local", vec!["target_dir", "upload_dir", "max_size"]);
     let google_section_keys = ("googlecloud", vec!["bucket_name"]);
 
     let local_keys = check_keys(local_section_keys.0, local_section_keys.1, &config_map);
@@ -479,7 +525,11 @@ fn verify_config() -> IniConfig {
         upload_dir: local_keys.get("upload_dir").unwrap().to_string(),
         target_dir: local_keys.get("target_dir").unwrap().to_string(),
         bucket_name: google_keys.get("bucket_name").unwrap().to_string(),
-        max_size: local_keys.get("max_size").unwrap_or(&"10".to_string()).parse::<u64>().unwrap(),
+        max_size: local_keys
+            .get("max_size")
+            .unwrap_or(&"10".to_string())
+            .parse::<u64>()
+            .unwrap(),
     }
 }
 
