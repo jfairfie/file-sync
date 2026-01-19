@@ -78,15 +78,18 @@ async fn display_different_files(config: &IniConfig) -> Result<(), Box<dyn std::
         println!("{}", file);
     }
 
-    let time = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?;
+    let time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
 
     let file_name = format!("song-diff-{:?}.txt", time);
 
     // Write to a local .txt file
     let txt_path = Path::new(&file_name);
 
-    let content = upload_files.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join("\n");
+    let content = upload_files
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<&str>>()
+        .join("\n");
     tokio::fs::write(txt_path, content).await?;
 
     Ok(())
@@ -98,6 +101,8 @@ async fn display_server_files() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|file| file.clone())
         .collect();
+
+    println!("Found {} file(s) on server", server_files.len());
 
     server_files.sort();
 
@@ -519,13 +524,15 @@ async fn list_server_files() -> Result<HashSet<String>, Box<dyn std::error::Erro
 }
 
 fn check_zipped_file(file_name: String) -> bool {
-    let name = file_name.split(".").collect::<Vec<&str>>();
+    let path = PathBuf::from(&file_name);
 
-    if name.len() < 2 || name.len() > 2 || name[1] != "zip" {
-        return false;
+    if let Some(ext) = path.extension() {
+        if ext.to_ascii_lowercase() == "zip" {
+            return true;
+        }
     }
 
-    true
+    false
 }
 
 fn verify_required_files() {
