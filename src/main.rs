@@ -38,7 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n---- Enter a command ----");
     println!("u -- upload files from upload file to the server");
     println!("s -- sync files to target directory from the server");
-    println!("l -- list current files and also write to a local .txt \n");
+    println!("l -- list current files and also write to a local .txt");
+    println!("p -- compare local files to server files \n");
 
     let stdin = io::stdin();
 
@@ -53,10 +54,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sync_with_server(&ini_config).await?;
     } else if input.trim() == "l" {
         display_server_files().await?;
+    } else if input.trim() == "p" {
+        display_different_files(&ini_config).await?;
     }
 
     println!("Enter any key to exit");
     reader.read_line(&mut input).await?;
+
+    Ok(())
+}
+
+async fn display_different_files(config: &IniConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let server_files = list_server_files().await?;
+    let local_files = list_local_files(&config.upload_dir, None)?;
+
+    let mut upload_files = local_files
+        .difference(&server_files)
+        .collect::<Vec<&String>>();
+
+    upload_files.sort();
+
+    for file in &upload_files {
+        println!("{}", file);
+    }
+
+    let time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?;
+
+    let file_name = format!("song-diff-{:?}.txt", time);
+
+    // Write to a local .txt file
+    let txt_path = Path::new(&file_name);
+
+    let content = upload_files.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join("\n");
+    tokio::fs::write(txt_path, content).await?;
 
     Ok(())
 }
@@ -78,7 +109,7 @@ async fn display_server_files() -> Result<(), Box<dyn std::error::Error>> {
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs();
 
-    let file_name = format!("song-list-{}", time);
+    let file_name = format!("song-list-{}.txt", time);
 
     // Write to a local .txt file
     let txt_path = Path::new(&file_name);
