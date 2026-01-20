@@ -39,7 +39,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("u -- upload files from upload file to the server");
     println!("s -- sync files to target directory from the server");
     println!("l -- list current files and also write to a local .txt");
-    println!("p -- compare local files to server files \n");
+    println!("p -- compare local files to server files");
+    println!("d -- delete a file");
+    println!();
 
     let stdin = io::stdin();
 
@@ -56,10 +58,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         display_server_files().await?;
     } else if input.trim() == "p" {
         display_different_files(&ini_config).await?;
+    } else if input.trim() == "d" {
+        delete_file(&ini_config).await?;
     }
 
     println!("Enter any key to exit");
     reader.read_line(&mut input).await?;
+
+    Ok(())
+}
+
+async fn delete_file(config: &IniConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let mut server_files = list_server_files()
+        .await?
+        .iter()
+        .map(|file| file.clone())
+        .collect::<Vec<String>>();
+    server_files.sort();
+
+    server_files
+        .iter()
+        .enumerate()
+        .for_each(|(i, file)| println!("{}: {}", i, file));
+
+    println!("Enter the index of the file to delete:");
+
+    let stdin = io::stdin();
+
+    let mut reader = io::BufReader::new(stdin);
+    let mut input: String = String::new();
+
+    reader.read_line(&mut input).await?;
+
+    let input = input.trim().parse::<usize>()?;
+
+    if input >= server_files.len() {
+        panic!("Invalid index");
+    }
+
+    let file_name = server_files.get(input).expect("Index out of bounds -- this shouldn't happen here");
+
+    let client = Client::new();
+
+    client.object().delete(config.bucket_name.as_str(), format!("{}.zip", file_name).as_str()).await?;
+
+    println!("Successfully deleted file: {}", file_name);
 
     Ok(())
 }
