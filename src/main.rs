@@ -312,6 +312,8 @@ async fn sync_with_server(config: &IniConfig) -> Result<(), Box<dyn std::error::
         download_files.len()
     );
 
+    println!("{:?}", download_files);
+
     let client = Client::new();
 
     let futures: Vec<_> = download_files
@@ -551,9 +553,10 @@ async fn list_server_files() -> Result<HashSet<String>, Box<dyn std::error::Erro
                 for object in res.items {
                     let file_name = object.name.clone();
 
-                    if check_zipped_file(file_name.clone()) {
-                        server_files
-                            .insert(file_name.split(".").collect::<Vec<&str>>()[0].to_string());
+                    let zipped_file_name = check_zipped_file(file_name.clone());
+
+                    if zipped_file_name.is_some() {
+                        server_files.insert(zipped_file_name.unwrap());
                     }
                 }
             }
@@ -566,16 +569,16 @@ async fn list_server_files() -> Result<HashSet<String>, Box<dyn std::error::Erro
     Ok(server_files)
 }
 
-fn check_zipped_file(file_name: String) -> bool {
+fn check_zipped_file(file_name: String) -> Option<String> {
     let path = PathBuf::from(&file_name);
 
     if let Some(ext) = path.extension() {
         if ext.to_ascii_lowercase() == "zip" {
-            return true;
+            return Some(path.file_stem()?.to_str()?.to_string());
         }
     }
 
-    false
+    None
 }
 
 fn verify_required_files() {
