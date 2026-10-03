@@ -96,11 +96,19 @@ async fn delete_file(config: &IniConfig) -> Result<(), Box<dyn std::error::Error
         panic!("Invalid index");
     }
 
-    let file_name = server_files.get(input).expect("Index out of bounds -- this shouldn't happen here");
+    let file_name = server_files
+        .get(input)
+        .expect("Index out of bounds -- this shouldn't happen here");
 
     let client = Client::new();
 
-    client.object().delete(config.bucket_name.as_str(), format!("{}.zip", file_name).as_str()).await?;
+    client
+        .object()
+        .delete(
+            config.bucket_name.as_str(),
+            format!("{}.zip", file_name).as_str(),
+        )
+        .await?;
 
     println!("Successfully deleted file: {}", file_name);
 
@@ -109,7 +117,7 @@ async fn delete_file(config: &IniConfig) -> Result<(), Box<dyn std::error::Error
 
 async fn display_different_files(config: &IniConfig) -> Result<(), Box<dyn std::error::Error>> {
     let server_files = list_server_files().await?;
-    let local_files = list_local_files(&config.upload_dir, None)?;
+    let local_files = list_local_files(&config.upload_dir)?;
 
     let mut upload_files = local_files
         .difference(&server_files)
@@ -171,7 +179,7 @@ async fn display_server_files() -> Result<(), Box<dyn std::error::Error>> {
 async fn sync_to_server(config: &IniConfig) -> Result<(), Box<dyn std::error::Error>> {
     println!("Checking for new files");
 
-    let local_files = list_local_files(&config.upload_dir, Some(config.max_size))?;
+    let local_files = list_local_files(&config.upload_dir)?;
     let server_files = list_server_files().await?;
 
     println!("Found {} file(s) on server", server_files.len());
@@ -222,17 +230,28 @@ async fn zip_and_upload(
 
     let temp_zip_path_clone = temp_zip_path.clone();
 
-    tokio::task::spawn_blocking(move || {
-        // Zip ONLY the specific song directory, not the whole upload folder
-        zip_directory_sync(&specific_song_path, &temp_zip_path).expect("Failed to zip");
+    let zip_result = tokio::task::spawn_blocking(move || {
+        zip_directory_sync(&specific_song_path, &temp_zip_path)
+            .map_err(|err| std::io::Error::other(err.to_string()))
     })
-    .await?;
+    .await;
 
-    upload_file(client, &config, &temp_zip_path_clone, file_name).await?;
+    let result = match zip_result {
+        Ok(Ok(())) => upload_file(client, config, &temp_zip_path_clone, file_name).await,
+        Ok(Err(err)) => Err(err.into()),
+        Err(err) => Err(err.into()),
+    };
 
-    // It's a good idea to uncomment this once you confirm it works
-    // to keep your upload folder clean
-    fs::remove_file(&temp_zip_path_clone).await?;
+    // Clean up temporary archives even when packaging or uploading fails.
+    if let Err(err) = fs::remove_file(&temp_zip_path_clone).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            eprintln!(
+                "Failed to remove temporary archive {:?}: {}",
+                temp_zip_path_clone, err
+            );
+        }
+    }
+    result?;
 
     Ok(())
 }
@@ -256,6 +275,10 @@ fn zip_directory_sync(
         let name = path.strip_prefix(source_dir)?;
 
         if path.is_file() {
+            if is_visual_media(path) {
+                println!("Skipping image/video: {}", path.display());
+                continue;
+            }
             zip.start_file(name.to_str().unwrap(), options)?;
 
             let mut f = File::open(path)?;
@@ -266,9 +289,60 @@ fn zip_directory_sync(
         }
     }
 
-    zip.finish().expect("Failed to finish zip archive");
+    zip.finish()?;
     println!("Successfully zipped directory");
 
+    Ok(())
+}
+
+// Match extensions case-insensitively, including media in nested folders.
+fn is_visual_media(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "bmp"
+            | "webp"
+            | "tif"
+            | "tiff"
+            | "tga"
+            | "dds"
+            | "avif"
+            | "heic"
+            | "svg"
+            | "mp4"
+            | "m4v"
+            | "mkv"
+            | "webm"
+            | "avi"
+            | "mov"
+            | "wmv"
+            | "mpg"
+            | "mpeg"
+            | "ogv"
+            | "flv"
+            | "3gp"
+            | "vob"
+            | "ts"
+            | "m2ts"
+    )
+}
+
+fn check_upload_size(size_bytes: u64, max_size_mib: u64) -> Result<(), std::io::Error> {
+    let max_bytes = max_size_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "max_size is too large")
+    })?;
+    if size_bytes > max_bytes {
+        return Err(std::io::Error::other(format!(
+            "Archive is {} bytes, exceeding max_size of {} MiB; skipping upload",
+            size_bytes, max_size_mib
+        )));
+    }
     Ok(())
 }
 
@@ -278,7 +352,10 @@ async fn upload_file(
     zipped_file_path: &Path,
     zip_file_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    check_upload_size(fs::metadata(zipped_file_path).await?.len(), config.max_size)?;
     let content = fs::read(zipped_file_path).await?;
+    // Verify the actual payload too, in case the file changed after the metadata check.
+    check_upload_size(content.len() as u64, config.max_size)?;
 
     client
         .object()
@@ -298,7 +375,7 @@ async fn upload_file(
 async fn sync_with_server(config: &IniConfig) -> Result<(), Box<dyn std::error::Error>> {
     println!("Checking for new files");
 
-    let local_files = list_local_files(&config.target_dir, None)?;
+    let local_files = list_local_files(&config.target_dir)?;
     let server_files = list_server_files().await?;
 
     let download_files: Vec<String> = server_files
@@ -478,10 +555,7 @@ async fn download_file(
     Ok(())
 }
 
-fn list_local_files(
-    dir: &String,
-    max_size: Option<u64>,
-) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+fn list_local_files(dir: &String) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
     let mut local_files: HashSet<String> = HashSet::new();
     let path = Path::new(dir);
 
@@ -490,28 +564,11 @@ fn list_local_files(
             Ok(res) => match res.file_type() {
                 Ok(file_type) => {
                     if file_type.is_dir() {
-                        if max_size.is_some() {
-                            // Convert mB to bytes and compare the size
-                            let max_size_bytes = max_size.unwrap() * 1024 * 1024;
-                            let dir_size = get_dir_size(res.path());
-
-                            println!(
-                                "Checking size of directory {}: {} {}",
-                                res.path().display(),
-                                dir_size,
-                                max_size_bytes
-                            );
-
-                            if dir_size <= max_size_bytes {
-                                local_files.insert(res.file_name().into_string().unwrap());
-                            }
-                        } else {
-                            local_files.insert(
-                                res.file_name()
-                                    .into_string()
-                                    .expect("Error converting to string"),
-                            );
-                        }
+                        local_files.insert(
+                            res.file_name()
+                                .into_string()
+                                .expect("Error converting to string"),
+                        );
                     }
                 }
                 Err(err) => {
@@ -525,16 +582,6 @@ fn list_local_files(
     }
 
     Ok(local_files)
-}
-
-fn get_dir_size(path: impl AsRef<Path>) -> u64 {
-    WalkDir::new(path)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.metadata().ok())
-        .filter(|metadata| metadata.is_file())
-        .map(|metadata| metadata.len())
-        .sum()
 }
 
 async fn list_server_files() -> Result<HashSet<String>, Box<dyn std::error::Error>> {
@@ -644,4 +691,104 @@ fn check_keys(
     });
 
     ret_map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visual_media_detection_preserves_song_files() {
+        for name in [
+            "album.JPG",
+            "nested/background.png",
+            "video.MP4",
+            "video.webm",
+        ] {
+            assert!(is_visual_media(Path::new(name)), "{name}");
+        }
+        for name in [
+            "song.ogg",
+            "guitar.opus",
+            "song.mp3",
+            "notes.chart",
+            "notes.mid",
+            "song.ini",
+            "README",
+        ] {
+            assert!(!is_visual_media(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn upload_limit_checks_exact_bytes_and_overflow() {
+        assert!(check_upload_size(1024 * 1024, 1).is_ok());
+        assert!(check_upload_size(1024 * 1024 + 1, 1).is_err());
+        assert!(check_upload_size(1, 0).is_err());
+        assert!(check_upload_size(1, u64::MAX).is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_song_is_discovered_and_packaged_without_visual_media() {
+        let temp = env::temp_dir().join(format!(
+            "file-sync-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let song = temp.join("Song");
+        std::fs::create_dir_all(song.join("nested")).unwrap();
+        for (name, content) in [
+            ("song.ini", "[song]"),
+            ("notes.chart", "chart"),
+            ("song.ogg", "audio"),
+        ] {
+            std::fs::write(song.join(name), content).unwrap();
+        }
+        std::fs::write(song.join("nested/video.MP4"), vec![1; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(song.join("album.JPG"), b"image").unwrap();
+        assert!(
+            list_local_files(&temp.to_str().unwrap().to_string())
+                .unwrap()
+                .contains("Song")
+        );
+
+        let archive_path = temp.join("Song.zip");
+        zip_directory_sync(&song, &archive_path).unwrap();
+        let mut archive = ZipArchive::new(File::open(&archive_path).unwrap()).unwrap();
+        assert_eq!(archive.len(), 3);
+        for (name, expected) in [
+            ("song.ini", "[song]"),
+            ("notes.chart", "chart"),
+            ("song.ogg", "audio"),
+        ] {
+            let mut content = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut content)
+                .unwrap();
+            assert_eq!(content, expected);
+        }
+        assert!(song.join("nested/video.MP4").exists());
+        assert!(check_upload_size(std::fs::metadata(&archive_path).unwrap().len(), 1).is_ok());
+        drop(archive);
+
+        // A zero limit must reject the ZIP before any cloud request is made.
+        let config = IniConfig {
+            target_dir: String::new(),
+            upload_dir: temp.to_str().unwrap().to_string(),
+            bucket_name: String::new(),
+            max_size: 0,
+        };
+        let err = zip_and_upload(&Client::new(), &config, &"Song".to_string())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeding max_size"));
+        assert!(!archive_path.exists());
+        assert!(song.join("song.ogg").exists());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
 }
